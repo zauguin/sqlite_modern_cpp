@@ -144,6 +144,9 @@ namespace sqlite {
 		static void iterate(Tuple&, database_binder&) {}
 	};
 
+	template<class ...T>
+	class row_view;
+
 	class database_binder {
 
 	public:
@@ -421,32 +424,37 @@ namespace sqlite {
 				binder<traits::arity>::run(*this, func);
 			});
 		}
+
+		template<typename... Types>
+		void operator>>(row_view<Types...>& rows) &;
+
+		template<typename... Types>
+		void operator>>(row_view<Types...>& rows) &&;
 	};
 
-	template<class ...T>
-	class owning_row_view
-	{
-	public:
-		owning_row_view(database_binder &&binder): _binder(std::move(binder)) {}
-		auto begin() { return database_binder::row_iterator<T...>(_binder); }
-		auto end() { return database_binder::row_iterator<T...>(); }
-	private:
-		database_binder _binder;
-	};
 	template<class ...T>
 	class row_view
 	{
 	public:
-		row_view(database_binder &binder): _binder(&binder) {}
-		auto begin() { return database_binder::row_iterator<T...>(*_binder); }
+		auto begin() {
+			return database_binder::row_iterator<T...>(
+					_binder.index() ? std::get<1>(_binder) : *std::get<0>(_binder));
+		}
 		auto end() { return database_binder::row_iterator<T...>(); }
 	private:
-		database_binder *_binder;
+		friend class database_binder;
+		std::variant<database_binder*, database_binder> _binder;
 	};
-	template<class ...T>
-	auto database_binder::as() & { return row_view<T...>(*this); }
-	template<class ...T>
-	auto database_binder::as() && { return owning_row_view<T...>(std::move(*this)); }
+
+	template<typename... Types>
+	void database_binder::operator>>(row_view<Types...>& rows) & {
+		rows._binder.template emplace<0>(this);
+	}
+
+	template<typename... Types>
+	void database_binder::operator>>(row_view<Types...>& rows) && {
+		rows._binder.template emplace<1>(std::move(*this));
+	}
 
 	namespace sql_function_binder {
 		template<
@@ -1174,9 +1182,4 @@ namespace sqlite {
 			}
 		}
 	}
-
-	template<class ...T>
-	auto as(database_binder &binder) { return row_view<T...>(binder); }
-	template<class ...T>
-	auto as(database_binder&&binder) { return owning_row_view<T...>(std::move(binder)); }
 }

@@ -49,16 +49,14 @@ int main() {
 					exit(EXIT_FAILURE);
 				cout << _age << ' ' << _name << ' ' << _weight << endl;
 		};
-		for(auto &&[_age, _name, _weight] : (db << "select age,name,weight from user where age > ? ;" << 21).as<int, string, double>()) {
-			if(_age != age || _name != name) 
-				exit(EXIT_FAILURE);
-			cout << _age << ' ' << _name << ' ' << _weight << endl;
-		}
-
-		for(auto &&[_age, _name, _weight] : as<int, string, double>(db << "select age,name,weight from user where age > ? ;" << 21)) {
-			if(_age != age || _name != name) 
-				exit(EXIT_FAILURE);
-			cout << _age << ' ' << _name << ' ' << _weight << endl;
+		{
+			row_view<int, string, double> rows;
+			db << "select age,name,weight from user where age > ? ;" << 21 >> rows;
+			for(auto &&[_age, _name, _weight] : rows) {
+				if(_age != age || _name != name) 
+					exit(EXIT_FAILURE);
+				cout << _age << ' ' << _name << ' ' << _weight << endl;
+			}
 		}
 
 		// selects the count(*) from user table
