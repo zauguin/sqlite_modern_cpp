@@ -4,6 +4,7 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <array>
 
 #ifdef __has_include
 #if __cplusplus > 201402 && __has_include(<optional>)
@@ -153,6 +154,8 @@ namespace sqlite {
 	// std::string
 	template<>
 	struct has_sqlite_type<std::string, SQLITE3_TEXT, void> : std::true_type {};
+	template<std::size_t N>
+	struct has_sqlite_type<char[N], SQLITE3_TEXT, void> : std::true_type {};
 
 	inline int bind_col_in_db(sqlite3_stmt* stmt, int inx, const std::string& val) {
 		return sqlite3_bind_text(stmt, inx, val.data(), -1, SQLITE_TRANSIENT);
@@ -176,6 +179,8 @@ namespace sqlite {
 	// std::u16string
 	template<>
 	struct has_sqlite_type<std::u16string, SQLITE3_TEXT, void> : std::true_type {};
+	template<std::size_t N>
+	struct has_sqlite_type<char16_t[N], SQLITE3_TEXT, void> : std::true_type {};
 
 	inline int bind_col_in_db(sqlite3_stmt* stmt, int inx, const std::u16string& val) {
 		return sqlite3_bind_text16(stmt, inx, val.data(), -1, SQLITE_TRANSIENT);
@@ -378,4 +383,77 @@ namespace sqlite {
 		});
 	}
 #endif
+
+	template<class T, class = void>
+	struct sqlite_multivalue_columns : std::integral_constant<int, is_sqlite_value<T>::value> {};
+
+	template<class T> inline auto get_cols_from_db(sqlite3_stmt *stmt, int inx, result_type<T> type)
+			-> decltype(get_col_from_db(stmt, inx, type)) {
+		return get_col_from_db(stmt, inx, type);
+	}
+	template <class T> inline auto bind_cols_in_db(sqlite3_stmt* stmt, int inx, const T& val)
+			-> decltype(bind_col_in_db(stmt, inx, val)) {
+				return bind_col_in_db(stmt, inx, val);
+	}
+
+	namespace detail {
+		constexpr int count_columns_or_zero(std::initializer_list<int> entries) {
+			int sum = 0;
+			for(int entry : entries) {
+				if(!entry)
+					return 0;
+				sum += entry;
+			}
+			return sum;
+		}
+		template<class Tuple, std::size_t ...Index>
+		constexpr std::array<int, sizeof...(Index)> cummulated_columns() {
+			int columns[] = {sqlite_multivalue_columns<typename std::tuple_element<Index, Tuple>::type>::value...};
+			auto sum = 0;
+			for(auto &column : columns) {
+				sum += column;
+				column = sum - column;
+			}
+			return {{columns[Index]...}};
+		}
+		constexpr int first_error(std::initializer_list<int> errors) {
+			for(int error : errors) {
+				if(error)
+					return error;
+			}
+			return 0;
+		}
+		template<class Tuple, std::size_t ...Index>
+		Tuple handle_tuple_get(sqlite3_stmt *stmt, int base_inx, std::index_sequence<Index...>) {
+			constexpr auto offsets = cummulated_columns<Tuple, Index...>();
+			return Tuple(
+					get_cols_from_db(
+						stmt,
+						base_inx + offsets[Index],
+						result_type<typename std::tuple_element<Index, Tuple>::type>())...);
+		}
+		template<class Tuple, std::size_t ...Index>
+		int handle_tuple_bind(sqlite3_stmt *stmt, int base_inx, const Tuple &val, std::index_sequence<Index...>) {
+			constexpr auto offsets = cummulated_columns<Tuple, Index...>();
+			return first_error({
+					bind_cols_in_db(
+						stmt,
+						base_inx + offsets[Index],
+						std::get<Index>(val))...});
+		}
+	}
+
+	template<class ...Types>
+	struct sqlite_multivalue_columns<std::tuple<Types...>> :
+			std::integral_constant<int, detail::count_columns_or_zero({sqlite_multivalue_columns<typename std::decay<Types>::type>::value...})> {};
+
+	template<class ...Types>
+	std::tuple<typename std::decay<Types>::type...> get_cols_from_db(sqlite3_stmt *stmt, int inx, result_type<std::tuple<Types...>>) {
+		return detail::handle_tuple_get<std::tuple<typename std::decay<Types>::type...>>(stmt, inx, std::index_sequence_for<Types...>());
+	}
+
+	template<class ...Types>
+	int bind_cols_in_db(sqlite3_stmt *stmt, int inx, const std::tuple<Types...> &val) {
+		return detail::handle_tuple_bind(stmt, inx, val, std::index_sequence_for<Types...>());
+	}
 }

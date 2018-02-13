@@ -36,8 +36,7 @@ public:
                 "   request text"
                 ");";
             db  << "INSERT INTO log_request (username, timestamp, ip, request) VALUES (?,?,?,?);" 
-                << username
-                << timestamp
+                << std::make_tuple(username, timestamp)
                 << ip
                 << request;
         } catch ( const std::exception& e ) {

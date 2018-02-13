@@ -59,8 +59,7 @@ namespace sqlite {
 		void used(bool state) {
 			if(!state) {
 				// We may have to reset first if we haven't done so already:
-				_next_index();
-				--_inx;
+				_get_index();
 			}
 			execution_started = state;
 		}
@@ -73,16 +72,16 @@ namespace sqlite {
 		std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> _stmt;
 		utility::UncaughtExceptionDetector _has_uncaught_exception;
 
-		int _inx;
+		int _inx = 1;
 
 		bool execution_started = false;
 
-		int _next_index() {
-			if(execution_started && !_inx) {
+		int &_get_index() {
+			if(execution_started && _inx == 1) {
 				sqlite3_reset(_stmt.get());
 				sqlite3_clear_bindings(_stmt.get());
 			}
-			return ++_inx;
+			return _inx;
 		}
 
 		sqlite3_stmt* _prepare(const std::u16string& sql) {
@@ -100,21 +99,19 @@ namespace sqlite {
 			return tmp;
 		}
 
-		template<typename T> friend database_binder& operator<<(database_binder& db, T&&);
+		template<typename T> friend database_binder& operator<<(database_binder& db, const T&);
 		friend void operator++(database_binder& db, int);
 
 	public:
 
 		database_binder(std::shared_ptr<sqlite3> db, std::u16string const & sql):
 			_db(db),
-			_stmt(_prepare(sql), sqlite3_finalize),
-			_inx(0) {
+			_stmt(_prepare(sql), sqlite3_finalize) {
 		}
 
 		database_binder(std::shared_ptr<sqlite3> db, std::string const & sql):
 			_db(db),
-			_stmt(_prepare(sql), sqlite3_finalize),
-			_inx(0) {
+			_stmt(_prepare(sql), sqlite3_finalize) {
 		}
 
 		~database_binder() noexcept(false) {
@@ -134,38 +131,26 @@ namespace sqlite {
 		public:
 			value_type(database_binder *_binder): _binder(_binder) {};
 			template<class T>
-			typename std::enable_if<is_sqlite_value<T>::value, value_type &>::type operator >>(T &result) {
-				result = get_col_from_db(_binder->_stmt.get(), next_index++, result_type<T>());
+			typename std::enable_if<sqlite_multivalue_columns<T>::value != 0, value_type &>::type operator >>(T &result) {
+				result = get_cols_from_db(_binder->_stmt.get(), next_index, result_type<T>());
+				next_index += sqlite_multivalue_columns<T>::value;
 				return *this;
 			}
 			template<class ...Types>
-			value_type &operator >>(std::tuple<Types...>& values) {
-				values = handle_tuple<std::tuple<typename std::decay<Types>::type...>>(std::index_sequence_for<Types...>());
-				next_index += sizeof...(Types);
-				return *this;
-			}
-			template<class ...Types>
-			value_type &operator >>(std::tuple<Types...>&& values) {
-				return *this >> values;
+			value_type &operator >>(std::tuple<Types&...> &&result) {
+				return *this >> result;
 			}
 			template<class ...Types>
 			operator std::tuple<Types...>() {
-				std::tuple<Types...> value;
-				*this >> value;
-				return value;
+				return get_cols_from_db(
+						_binder->_stmt.get(),
+						std::exchange(next_index, next_index + sqlite_multivalue_columns<std::tuple<Types...>>::value),
+						result_type<std::tuple<Types...>>());
 			}
 			explicit operator bool() {
 				return sqlite3_column_count(_binder->_stmt.get()) >= next_index;
 			}
 		private:
-			template<class Tuple, std::size_t ...Index>
-			Tuple handle_tuple(std::index_sequence<Index...>) {
-				return Tuple(
-						get_col_from_db(
-							_binder->_stmt.get(),
-							next_index + Index,
-							result_type<typename std::tuple_element<Index, Tuple>::type>())...);
-			}
 			database_binder *_binder;
 			int next_index = 0;
 		};
@@ -176,8 +161,7 @@ namespace sqlite {
 
 		row_iterator() = default;
 		explicit row_iterator(database_binder &binder): _binder(&binder) {
-			_binder->_next_index();
-			_binder->_inx = 0;
+			_binder->_get_index() = 1;
 			_binder->used(true);
 			++*this;
 		}
@@ -494,8 +478,11 @@ namespace sqlite {
 	// Some ppl are lazy so we have a operator for proper prep. statemant handling.
 	void inline operator++(database_binder& db, int) { db.execute(); }
 
-	template<typename T> database_binder &operator<<(database_binder& db, T&& val) {
-		int result = bind_col_in_db(db._stmt.get(), db._next_index(), std::forward<T>(val));
+	template<typename T> database_binder &operator<<(database_binder& db, const T& val) {
+		static_assert(sqlite_multivalue_columns<T>::value!=0, "Binding parameters of this type is not supported.");
+		auto &next_index = db._get_index();
+		int result = bind_cols_in_db(db._stmt.get(), next_index, val);
+		next_index += sqlite_multivalue_columns<T>::value;
 		if(result != SQLITE_OK)
 			exceptions::throw_sqlite_error(result, db.sql());
 		return db;
